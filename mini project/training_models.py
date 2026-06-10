@@ -16,6 +16,7 @@ from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
 import kagglehub
 
+os.environ["HF_TOKEN"] = "Token_Name"
 # --- 1. FORCE E SETTINGS ---
 E_DRIVE = "E:/"
 CACHE_DIR = os.path.join(E_DRIVE, "kaggle_cache")
@@ -114,6 +115,14 @@ print(classification_report(y_test, predictions))
 print(f"Text Model Saved! Accuracy: {accuracy:.2%}")
 
 # --- 4. IMAGE MODEL TRAINING (Robust Version) ---
+class SafeImageFolder(datasets.ImageFolder):
+    def __getitem__(self, index):
+        try:
+            return super().__getitem__(index)
+        except Exception:
+            # If a file is corrupt, skip to the next index
+            print(f"Skipping corrupt index: {index}")
+            return self.__getitem__((index + 1) % len(self))
 print("\n--- Step 2: Accessing DeepDetect on E: drive---")
 try:
     # download using a simpler method to avoid terminal "junk"
@@ -133,31 +142,7 @@ try:
         transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
     ])
 
-    # Custom Loader to skip corrupted/locked files on the pendrive
-    def safe_loader(path):
-        try:
-            from PIL import Image
-            return Image.open(path).convert('RGB')
-        except Exception:
-            return None # We will filter these out
-
-    train_data = datasets.ImageFolder(train_dir, transform=transform, loader=safe_loader)
-    
-    
-    from PIL import Image
-
-    valid_samples = []
-
-    for path, label in train_data.samples:
-        try:
-            img = Image.open(path)
-            img.verify()
-            valid_samples.append((path, label))
-        except:
-            print(f"Skipped corrupted file: {path}")
-
-    train_data.samples = valid_samples
-
+    train_data = SafeImageFolder(train_dir, transform=transform)
     train_loader = DataLoader(train_data, batch_size=32, shuffle=True)
 
     class DeepDetectNet(nn.Module):
