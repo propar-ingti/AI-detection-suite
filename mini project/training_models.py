@@ -1,4 +1,5 @@
 import os
+import time
 import sys
 import joblib
 import pandas as pd
@@ -8,6 +9,7 @@ from datasets import load_dataset
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression  # Better for mixed features
 from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report
 from scipy.sparse import hstack
 import torch
 import torch.nn as nn
@@ -16,7 +18,6 @@ from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
 import kagglehub
 
-os.environ["HF_TOKEN"] = "Token_Name"
 # --- 1. FORCE E SETTINGS ---
 E_DRIVE = "E:/"
 CACHE_DIR = os.path.join(E_DRIVE, "kaggle_cache")
@@ -55,14 +56,23 @@ print("--- Step 1: Training Text Model ---")
 
 HF_CACHE = os.path.join(E_DRIVE, "huggingface_cache")
 
+os.environ["HF_TOKEN"] = "Token_name"
 os.environ["HF_HOME"] = HF_CACHE
 os.environ["HF_DATASETS_CACHE"] = HF_CACHE
 
 # Load Hugging Face dataset
+start = time.time()
+print("Loading dataset...")
 ds = load_dataset("artem9k/ai-text-detection-pile")
+print(f"Dataset loaded in {time.time()-start:.2f} sec")
 
-# Convert to pandas dataframe
-df = ds["train"].to_pandas()
+# ---------------- Convert to DataFrame ----------------
+start = time.time()
+print("Converting to dataframe...")
+df = ds["train"].to_pandas().dropna(subset=['text', 'source'])
+
+# Use subset for faster training
+df = df.sample(50000, random_state=42)
 
 # Create labels
 df['label'] = df['source'].map({
@@ -70,19 +80,40 @@ df['label'] = df['source'].map({
     'ai': 1
 })
 
-# Remove missing values
-df = df.dropna(subset=['text', 'label'])
+print(f"Using {len(df)} samples")
+print(f"Done in {time.time()-start:.2f} sec")
 
-vectorizer = TfidfVectorizer(ngram_range=(1, 2), max_features=10000)
+# ---------------- TF-IDF Features ----------------
+start = time.time()
+print("Creating TF-IDF features...")
+
+vectorizer = TfidfVectorizer(
+    ngram_range=(1, 1),      # Faster than (1,2)
+    max_features=5000,
+    stop_words='english'
+)
+
 X_tfidf = vectorizer.fit_transform(df['text'])
 
-# Calculate and stack numerical features
+print(f"TF-IDF done in {time.time()-start:.2f} sec")
+
+# ---------------- Numerical Features ----------------
+start = time.time()
 print("Calculating writing style features...")
-X_numerical = np.array([get_numerical_features(t) for t in df['text']])
+
+X_numerical = np.array(
+    [get_numerical_features(text) for text in df['text']],
+    dtype=np.float32
+)
+
 X_final = hstack([X_tfidf, X_numerical])
 
+print(f"Style features done in {time.time()-start:.2f} sec")
+
+# ---------------- Labels ----------------
 y = df['label']
 
+# ---------------- Train-Test Split ----------------
 X_train, X_test, y_train, y_test = train_test_split(
     X_final,
     y,
@@ -91,12 +122,24 @@ X_train, X_test, y_train, y_test = train_test_split(
     stratify=y
 )
 
+# ---------------- Model ----------------
+start = time.time()
+print("Training model...")
+
 text_model = LogisticRegression(
-    max_iter=2000
-) 
+    solver='saga',
+    max_iter=500,
+    n_jobs=-1,
+    random_state=42
+)
+
 text_model.fit(X_train, y_train)
 
+print(f"Training completed in {time.time()-start:.2f} sec")
+
+# ---------------- Save ----------------
 os.makedirs("models", exist_ok=True)
+
 joblib.dump(text_model, "models/text_detector_v2.pkl")
 joblib.dump(vectorizer, "models/tfidf_v2.pkl")
 
@@ -107,12 +150,15 @@ label_map = {
 
 joblib.dump(label_map, "models/label_map.pkl")
 
+# ---------------- Evaluation ----------------
 accuracy = text_model.score(X_test, y_test)
 predictions = text_model.predict(X_test)
-from sklearn.metrics import classification_report
 
+print("\nClassification Report:")
 print(classification_report(y_test, predictions))
-print(f"Text Model Saved! Accuracy: {accuracy:.2%}")
+
+print(f"\nText Model Saved!")
+print(f"Accuracy: {accuracy:.2%}")
 
 # --- 4. IMAGE MODEL TRAINING (Robust Version) ---
 class SafeImageFolder(datasets.ImageFolder):
@@ -143,7 +189,7 @@ try:
     ])
 
     train_data = SafeImageFolder(train_dir, transform=transform)
-    train_loader = DataLoader(train_data, batch_size=32, shuffle=True)
+    train_loader = DataLoader(train_data, batch_size=32, shuffle=True, num_workers=2, pin_memory=True )
 
     class DeepDetectNet(nn.Module):
         def __init__(self):
